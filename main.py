@@ -5,7 +5,7 @@
 import os
 import json
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,28 +38,16 @@ tickets = load_tickets()
 
 
 # ---------------- READY ----------------
-@tasks.loop(seconds=30)
-async def rotate_status():
-    statuses = [
-        discord.Activity(
-            type=discord.ActivityType.watching, name="Passenger Inquiries"
-        ),
-        discord.Activity(type=discord.ActivityType.watching, name="Garuda Operations"),
-        discord.Activity(type=discord.ActivityType.watching, name="New Tickets"),
-        discord.Activity(type=discord.ActivityType.watching, name="Cabin Services"),
-    ]
-
-    if not hasattr(rotate_status, "index"):
-        rotate_status.index = 0
-
-    await bot.change_presence(activity=statuses[rotate_status.index])
-    rotate_status.index = (rotate_status.index + 1) % len(statuses)
-
-
 @bot.event
 async def on_ready():
-    rotate_status.start()
-    print(f"{bot.user} is online.")
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="Have inquiries? Ananya is available to assist, 24/7",
+        ),
+    )
+    print(f"{bot.user} is online and presence set: Ananya is available to assist, 24/7.")
 
 
 # ---------------- BUTTON VIEW ----------------
