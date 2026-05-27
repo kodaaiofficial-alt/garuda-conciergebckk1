@@ -5,7 +5,7 @@
 import os
 import json
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,17 +37,34 @@ def save_tickets():
 tickets = load_tickets()
 
 
-# ---------------- READY ----------------
-@bot.event
-async def on_ready():
+# ---------------- ROTATING STATUS ----------------
+STATUSES = [
+    "Passenger Inquiries",
+    "Garuda Operations",
+    "New Tickets",
+    "Cabin Services",
+    "Have inquiries? Ananya is available to assist, 24/7",
+]
+status_index = 0
+
+@tasks.loop(seconds=30)
+async def rotate_status():
+    global status_index
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="Have inquiries? Ananya is available to assist, 24/7",
+            name=STATUSES[status_index],
         ),
     )
-    print(f"{bot.user} is online and presence set: Ananya is available to assist, 24/7.")
+    status_index = (status_index + 1) % len(STATUSES)
+
+
+# ---------------- READY ----------------
+@bot.event
+async def on_ready():
+    rotate_status.start()
+    print(f"{bot.user} is online. Rotating status started.")
 
 
 # ---------------- BUTTON VIEW ----------------
