@@ -9,7 +9,19 @@ import re
 # RYAN AIR CONCIERGE CONFIG
 # =========================
 
-TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if TOKEN:
+    TOKEN = TOKEN.strip()
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is missing in Railway Variables.")
+
+if TOKEN.startswith("Bot "):
+    raise RuntimeError("Remove 'Bot ' from your token. Paste only the raw bot token.")
+
+if "DISCORD_TOKEN=" in TOKEN:
+    raise RuntimeError("In Railway value, paste only the token, not DISCORD_TOKEN=token.")
 PREFIX = "-"
 
 # Replace these with your real Discord IDs
