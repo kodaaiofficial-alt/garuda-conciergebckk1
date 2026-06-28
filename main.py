@@ -22,14 +22,14 @@ if TOKEN.startswith("Bot "):
 
 if "DISCORD_TOKEN=" in TOKEN:
     raise RuntimeError("In Railway value, paste only the token, not DISCORD_TOKEN=token.")
+
 PREFIX = "-"
 
-# Replace these with your real Discord IDs
+# Put your Ryan Air Concierge staff/support role ID here
 SUPPORT_ROLE_ID = 123456789012345678
-TICKET_CATEGORY_ID = 123456789012345678
 
-# Put 0 if you want "hi" to trigger everywhere
-SUPPORT_TRIGGER_CHANNEL_ID = 0
+# Your ticket category ID
+TICKET_CATEGORY_ID = 1502957109560606871
 
 SNIPPETS_FILE = "snippets.json"
 BRAND_COLOR = 0x122E63
@@ -65,6 +65,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
+intents.dm_messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
@@ -92,7 +93,8 @@ def save_snippets(data):
 def clean_name(name):
     name = name.lower()
     name = re.sub(r"[^a-z0-9-]", "-", name)
-    return name[:20]
+    name = name.strip("-")
+    return name[:24] if name else "user"
 
 
 async def safe_delete(message):
@@ -103,7 +105,10 @@ async def safe_delete(message):
 
 
 def has_support_perms(member):
-    if member.guild_permissions.manage_messages or member.guild_permissions.administrator:
+    if member.guild_permissions.administrator:
+        return True
+
+    if member.guild_permissions.manage_messages:
         return True
 
     return any(role.id == SUPPORT_ROLE_ID for role in member.roles)
@@ -118,243 +123,256 @@ def is_support():
     return commands.check(predicate)
 
 
-def make_confirm_embed():
-    embed = discord.Embed(
-        title=f"{RYR_LOGO} Confirm thread creation",
-        description=(
-            f"{RYR_FLAG} **Dia dhuit,** thank you for contacting **Ryan Air Concierge**.\n\n"
-            f"> {RYR_BLUE_ARROW} We appreciate your interest in consulting with us today, "
-            f"but are you sure you want to create a ticket? Please select below."
-        ),
-        color=BRAND_COLOR
-    )
+def get_ticket_user_id_from_channel(channel):
+    if not channel.topic:
+        return None
 
-    embed.set_thumbnail(url=LOGO_URL)
-    embed.set_footer(text="Ryan Air Concierge")
-    return embed
+    match = re.search(r"ryanair-dm-user:(\d+)", channel.topic)
+
+    if not match:
+        return None
+
+    return int(match.group(1))
 
 
-def make_opening_embed(user):
-    embed = discord.Embed(
-        title=f"{RYR_PLANE} Ryan Air Concierge",
-        description=(
-            f"{RYR_DECENT} providing assistance of high quality\n\n"
-            f"**Commendations,** thank you for contacting the **Ryan Air Concierge**.\n\n"
-            f"> {RYR_BLUE_ARROW} An agent will be **assigned** to you shortly, and we request your "
-            f"**patience** while an available one is located.\n\n"
-            f"Whilst assistance is found, please inform us with what support we may assist you with, "
-            f"by selecting an **inquiry** from the following selections that corresponds to your inquiry today.\n\n"
-            f"{RYR_PARTNERSHIP} **[1] Public Relations Inquiry**\n"
-            f"{RYR_ACADEMY} **[2] Human Resources Inquiry**\n"
-            f"{RYR_PLANE} **[3] Operations Inquiry**\n"
-            f"{RYR_CHECKLIST} **[4] General Concerns**\n"
-            f"{RYR_ANALYTICS} **[5] Rank Request**\n"
-            f"{RYR_NETWORK} **[6] Auxiliary Inquiry**\n\n"
-            f"{RYR_BLUE_ARROW} Please remain **patient** as we locate an agent to **assist you**, "
-            f"and feel free to provide us with other relevant information regarding your claim today."
-        ),
-        color=BRAND_COLOR
-    )
-
-    embed.set_author(name="Ryan Air Concierge", icon_url=LOGO_URL)
-    embed.set_thumbnail(url=LOGO_URL)
-    embed.set_footer(text=f"Ticket opened by {user}", icon_url=user.display_avatar.url)
-    return embed
+def is_ticket_channel(channel):
+    return get_ticket_user_id_from_channel(channel) is not None
 
 
-def find_existing_ticket(guild, user):
-    topic_text = f"ryanair-ticket-user:{user.id}"
+async def get_ticket_category():
+    category = bot.get_channel(TICKET_CATEGORY_ID)
 
-    for channel in guild.text_channels:
-        if channel.topic and topic_text in channel.topic:
+    if category is None:
+        try:
+            category = await bot.fetch_channel(TICKET_CATEGORY_ID)
+        except:
+            return None
+
+    if not isinstance(category, discord.CategoryChannel):
+        return None
+
+    return category
+
+
+async def get_ticket_user(channel):
+    user_id = get_ticket_user_id_from_channel(channel)
+
+    if user_id is None:
+        return None
+
+    try:
+        return await bot.fetch_user(user_id)
+    except:
+        return None
+
+
+async def find_existing_ticket(user_id):
+    category = await get_ticket_category()
+
+    if category is None:
+        return None
+
+    topic_key = f"ryanair-dm-user:{user_id}"
+
+    for channel in category.text_channels:
+        if channel.topic and topic_key in channel.topic:
             return channel
 
     return None
 
 
-# =========================
-# VIEWS / BUTTONS / DROPDOWN
-# =========================
+async def create_ticket_channel(user, first_message=None):
+    category = await get_ticket_category()
 
-class TicketPromptView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+    if category is None:
+        return None
 
-    @discord.ui.button(
-        label="Create Ticket",
-        style=discord.ButtonStyle.green,
-        emoji=RYR_YELLOW_ARROW,
-        custom_id="ryanair_create_ticket"
+    guild = category.guild
+    support_role = guild.get_role(SUPPORT_ROLE_ID)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_messages=True,
+            attach_files=True,
+            embed_links=True
+        )
+    }
+
+    if support_role:
+        overwrites[support_role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_messages=True,
+            attach_files=True,
+            embed_links=True
+        )
+
+    channel = await guild.create_text_channel(
+        name=f"ticket-{clean_name(user.name)}",
+        category=category,
+        overwrites=overwrites,
+        topic=f"Ryan Air Concierge DM ticket | ryanair-dm-user:{user.id}",
+        reason=f"Ryan Air Concierge DM ticket opened by {user}"
     )
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
 
-        if guild is None:
-            return await interaction.response.send_message(
-                "This can only be used inside a server.",
-                ephemeral=True
-            )
+    opening_embed = discord.Embed(
+        title=f"{RYR_PLANE} Ryan Air Concierge",
+        description=(
+            f"{RYR_DECENT} providing assistance of high quality\n\n"
+            f"**Commendations,** a new user has contacted the **Ryan Air Concierge** through direct messages.\n\n"
+            f"> {RYR_BLUE_ARROW} Staff may communicate with this user directly from this channel.\n\n"
+            f"{RYR_CHECKLIST} **Available Staff Commands**\n"
+            f"{RYR_YELLOW_ARROW} `-r message` — reply to the user\n"
+            f"{RYR_YELLOW_ARROW} `-ra message` — anonymous reply\n"
+            f"{RYR_YELLOW_ARROW} `-snippets` — view saved snippets\n"
+            f"{RYR_YELLOW_ARROW} `-close` — close this ticket\n\n"
+            f"{RYR_FLAG} Please remain **professional**, **patient**, and **clear** while handling this inquiry."
+        ),
+        color=BRAND_COLOR
+    )
 
-        existing = find_existing_ticket(guild, user)
+    opening_embed.set_author(name="Ryan Air Concierge", icon_url=LOGO_URL)
+    opening_embed.set_thumbnail(url=LOGO_URL)
+    opening_embed.add_field(name="User", value=f"{user.mention}", inline=True)
+    opening_embed.add_field(name="User ID", value=f"`{user.id}`", inline=True)
+    opening_embed.set_footer(text="Ryan Air Concierge Modmail")
 
-        if existing:
-            return await interaction.response.send_message(
-                f"{RYR_BLUE_ARROW} You already have an open ticket: {existing.mention}",
-                ephemeral=True
-            )
+    mention_text = support_role.mention if support_role else ""
 
-        support_role = guild.get_role(SUPPORT_ROLE_ID)
-        category = guild.get_channel(TICKET_CATEGORY_ID)
+    await channel.send(
+        content=mention_text,
+        embed=opening_embed,
+        view=TicketCloseView()
+    )
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-                embed_links=True
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True,
-                manage_messages=True
-            )
-        }
+    if first_message:
+        await forward_user_message_to_channel(channel, first_message, is_first=True)
 
-        if support_role:
-            overwrites[support_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_messages=True
-            )
+    return channel
 
-        channel = await guild.create_text_channel(
-            name=f"ticket-{clean_name(user.name)}",
-            category=category if isinstance(category, discord.CategoryChannel) else None,
-            overwrites=overwrites,
-            topic=f"Ryan Air Concierge ticket | ryanair-ticket-user:{user.id}",
-            reason="Ryan Air Concierge ticket created"
+
+async def forward_user_message_to_channel(channel, message, is_first=False):
+    user = message.author
+
+    description = message.content if message.content else "*No text content provided.*"
+
+    embed = discord.Embed(
+        title=f"{RYR_BOARDINGPASS} {'New Ticket Message' if is_first else 'User Reply'}",
+        description=description,
+        color=BRAND_COLOR
+    )
+
+    embed.set_author(name=f"{user} • {user.id}", icon_url=user.display_avatar.url)
+    embed.set_footer(text="Message received through DM")
+
+    if message.attachments:
+        attachment_lines = []
+
+        for attachment in message.attachments:
+            attachment_lines.append(f"[{attachment.filename}]({attachment.url})")
+
+        embed.add_field(
+            name=f"{RYR_MAINTENANCE} Attachments",
+            value="\n".join(attachment_lines),
+            inline=False
         )
 
-        opening_embed = make_opening_embed(user)
+        first_attachment = message.attachments[0]
 
-        mention_text = f"{user.mention}"
-        if support_role:
-            mention_text += f" {support_role.mention}"
+        if first_attachment.content_type and first_attachment.content_type.startswith("image"):
+            embed.set_image(url=first_attachment.url)
 
-        await channel.send(
-            content=mention_text,
-            embed=opening_embed,
-            view=TicketControlView()
+    await channel.send(embed=embed)
+
+
+async def send_staff_reply_to_user(ctx, anonymous=False, message_text=""):
+    target_user = await get_ticket_user(ctx.channel)
+
+    if target_user is None:
+        return await ctx.send(
+            f"{RYR_BLUE_ARROW} This command must be used inside a Ryan Air Concierge ticket channel."
         )
 
-        await interaction.response.send_message(
-            f"{RYR_YELLOW_ARROW} Your ticket has been created: {channel.mention}",
-            ephemeral=True
-        )
+    files = []
 
+    for attachment in ctx.message.attachments:
         try:
-            await interaction.message.edit(view=None)
+            files.append(await attachment.to_file())
         except:
             pass
 
-    @discord.ui.button(
-        label="No, thanks",
-        style=discord.ButtonStyle.gray,
-        emoji=RYR_BLUE_ARROW,
-        custom_id="ryanair_no_ticket"
-    )
-    async def no_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title=f"{RYR_LOGO} Ryan Air Concierge",
-            description=f"{RYR_BLUE_ARROW} Alright, no ticket was created.",
-            color=BRAND_COLOR
+    if not message_text and not files:
+        return await ctx.send(
+            f"{RYR_BLUE_ARROW} Please provide a message or attachment to send."
         )
 
-        await interaction.response.edit_message(embed=embed, view=None)
-
-
-class InquirySelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(
-                label="Public Relations Inquiry",
-                description="Partnerships, affiliates, relations, or media concerns.",
-                emoji=RYR_PARTNERSHIP,
-                value="Public Relations Inquiry"
-            ),
-            discord.SelectOption(
-                label="Human Resources Inquiry",
-                description="Staff, recruitment, rank, or department support.",
-                emoji=RYR_ACADEMY,
-                value="Human Resources Inquiry"
-            ),
-            discord.SelectOption(
-                label="Operations Inquiry",
-                description="Flights, operations, events, or aviation-related support.",
-                emoji=RYR_PLANE,
-                value="Operations Inquiry"
-            ),
-            discord.SelectOption(
-                label="General Concerns",
-                description="General server, member, or support questions.",
-                emoji=RYR_CHECKLIST,
-                value="General Concerns"
-            ),
-            discord.SelectOption(
-                label="Rank Request",
-                description="Request or verify a rank.",
-                emoji=RYR_ANALYTICS,
-                value="Rank Request"
-            ),
-            discord.SelectOption(
-                label="Auxiliary Inquiry",
-                description="Other departments or additional assistance.",
-                emoji=RYR_NETWORK,
-                value="Auxiliary Inquiry"
-            )
+    if anonymous:
+        random_names = [
+            "Ryan Air Concierge",
+            "Concierge Agent",
+            "Guest Relations Agent",
+            "Customer Relations",
+            "Support Representative",
+            "Ryan Air Assistant"
         ]
 
-        super().__init__(
-            placeholder="Select your inquiry type...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="ryanair_inquiry_select"
+        shown_name = random.choice(random_names)
+    else:
+        shown_name = "Ryan Air Concierge"
+
+    dm_embed = discord.Embed(
+        title=f"{RYR_PLANE} {shown_name}",
+        description=message_text if message_text else "*Attachment sent by Ryan Air Concierge.*",
+        color=BRAND_COLOR
+    )
+
+    dm_embed.set_author(name=shown_name, icon_url=LOGO_URL)
+    dm_embed.set_footer(text="Ryan Air Concierge")
+
+    try:
+        await target_user.send(embed=dm_embed, files=files)
+    except discord.Forbidden:
+        return await ctx.send(
+            f"{RYR_BLUE_ARROW} I cannot DM this user. Their DMs may be closed."
+        )
+    except:
+        return await ctx.send(
+            f"{RYR_BLUE_ARROW} Failed to send the message to the user."
         )
 
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
+    log_embed = discord.Embed(
+        title=f"{RYR_ASCENT} Reply Sent",
+        description=message_text if message_text else "*Attachment sent.*",
+        color=BRAND_COLOR
+    )
 
-        embed = discord.Embed(
-            title=f"{RYR_CHECKLIST} Inquiry Selected",
-            description=(
-                f"{RYR_BLUE_ARROW} {interaction.user.mention} has selected:\n\n"
-                f"**{selected}**\n\n"
-                f"Please provide all relevant information below so our team can assist you."
-            ),
-            color=BRAND_COLOR
-        )
+    log_embed.add_field(name="Sent To", value=f"{target_user} (`{target_user.id}`)", inline=False)
+    log_embed.add_field(name="Sent By", value=f"{ctx.author.mention}", inline=True)
+    log_embed.add_field(name="Anonymous", value="Yes" if anonymous else "No", inline=True)
+    log_embed.set_footer(text="Ryan Air Concierge Staff Reply")
 
-        embed.set_footer(text="Ryan Air Concierge")
-        await interaction.response.send_message(embed=embed)
+    await safe_delete(ctx.message)
+    await ctx.send(embed=log_embed)
 
 
-class TicketControlView(discord.ui.View):
+# =========================
+# BUTTONS
+# =========================
+
+class TicketCloseView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(InquirySelect())
 
     @discord.ui.button(
         label="Close Ticket",
         style=discord.ButtonStyle.red,
-        emoji=RYR_MAINTENANCE,
-        custom_id="ryanair_close_ticket"
+        custom_id="ryanair_close_dm_ticket"
     )
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not has_support_perms(interaction.user):
@@ -363,10 +381,26 @@ class TicketControlView(discord.ui.View):
                 ephemeral=True
             )
 
-        await interaction.response.send_message(
-            f"{RYR_MAINTENANCE} Closing this ticket..."
-        )
+        target_user = await get_ticket_user(interaction.channel)
 
+        if target_user:
+            close_embed = discord.Embed(
+                title=f"{RYR_MAINTENANCE} Ticket Closed",
+                description=(
+                    f"{RYR_BLUE_ARROW} Your Ryan Air Concierge ticket has now been closed.\n\n"
+                    f"Thank you for contacting us."
+                ),
+                color=BRAND_COLOR
+            )
+
+            close_embed.set_footer(text="Ryan Air Concierge")
+
+            try:
+                await target_user.send(embed=close_embed)
+            except:
+                pass
+
+        await interaction.response.send_message(f"{RYR_MAINTENANCE} Closing ticket...")
         await interaction.channel.delete(reason="Ryan Air Concierge ticket closed")
 
 
@@ -376,8 +410,7 @@ class TicketControlView(discord.ui.View):
 
 @bot.event
 async def on_ready():
-    bot.add_view(TicketPromptView())
-    bot.add_view(TicketControlView())
+    bot.add_view(TicketCloseView())
 
     print("==============================")
     print(f"Logged in as {bot.user}")
@@ -390,23 +423,39 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    content = message.content.lower().strip()
+    # DM MODMAIL SYSTEM
+    if isinstance(message.channel, discord.DMChannel):
+        existing_channel = await find_existing_ticket(message.author.id)
 
-    # Make sure normal prefix commands still work
-    if content.startswith(PREFIX):
-        await bot.process_commands(message)
+        if existing_channel is None:
+            new_channel = await create_ticket_channel(message.author, first_message=message)
+
+            if new_channel is None:
+                return await message.author.send(
+                    "Ryan Air Concierge could not create your ticket. Please contact staff directly."
+                )
+
+            confirm_embed = discord.Embed(
+                title=f"{RYR_LOGO} Ryan Air Concierge",
+                description=(
+                    f"{RYR_FLAG} **Dia dhuit,** thank you for contacting **Ryan Air Concierge**.\n\n"
+                    f"> {RYR_BLUE_ARROW} Your ticket has been created and forwarded to our support team.\n\n"
+                    f"{RYR_YELLOW_ARROW} You may continue sending messages here, and our staff will reply shortly."
+                ),
+                color=BRAND_COLOR
+            )
+
+            confirm_embed.set_thumbnail(url=LOGO_URL)
+            confirm_embed.set_footer(text="Ryan Air Concierge")
+
+            await message.author.send(embed=confirm_embed)
+
+        else:
+            await forward_user_message_to_channel(existing_channel, message)
+
         return
 
-    # Channel restriction for hi popup
-    if SUPPORT_TRIGGER_CHANNEL_ID != 0 and message.channel.id != SUPPORT_TRIGGER_CHANNEL_ID:
-        return
-
-    if content in ["hi", "hello", "hey"]:
-        await message.channel.send(
-            embed=make_confirm_embed(),
-            view=TicketPromptView()
-        )
-
+    # SERVER PREFIX COMMANDS
     await bot.process_commands(message)
 
 
@@ -416,33 +465,14 @@ async def on_message(message):
 
 @bot.command(name="r")
 @is_support()
-async def reply(ctx, *, message):
-    await safe_delete(ctx.message)
-    await ctx.send(message)
+async def reply(ctx, *, message: str = ""):
+    await send_staff_reply_to_user(ctx, anonymous=False, message_text=message)
 
 
 @bot.command(name="ra")
 @is_support()
-async def anonymous_reply(ctx, *, message):
-    await safe_delete(ctx.message)
-
-    names = [
-        "Ryan Air Concierge",
-        "Concierge Agent",
-        "Guest Relations Agent",
-        "Support Representative",
-        "Ryan Air Assistant",
-        "Customer Relations"
-    ]
-
-    embed = discord.Embed(
-        description=message,
-        color=BRAND_COLOR
-    )
-
-    embed.set_author(name=random.choice(names), icon_url=LOGO_URL)
-    embed.set_footer(text="Ryan Air Concierge")
-    await ctx.send(embed=embed)
+async def anonymous_reply(ctx, *, message: str = ""):
+    await send_staff_reply_to_user(ctx, anonymous=True, message_text=message)
 
 
 @bot.command(name="snippets")
@@ -457,8 +487,9 @@ async def snippets(ctx):
 
     for name, content in data.items():
         preview = content.replace("\n", " ")
-        if len(preview) > 80:
-            preview = preview[:80] + "..."
+
+        if len(preview) > 90:
+            preview = preview[:90] + "..."
 
         description += f"{RYR_YELLOW_ARROW} `{name}` — {preview}\n"
 
@@ -468,7 +499,7 @@ async def snippets(ctx):
         color=BRAND_COLOR
     )
 
-    embed.set_footer(text="Use -snippet add, -snippet edit, or -snippet delete")
+    embed.set_footer(text="Ryan Air Concierge Snippets")
     await ctx.send(embed=embed)
 
 
@@ -496,7 +527,7 @@ async def snippet_add(ctx, name: str, *, content):
 
     if name in data:
         return await ctx.send(
-            f"{RYR_BLUE_ARROW} A snippet named `{name}` already exists. Use `-snippet edit {name} ...` instead."
+            f"{RYR_BLUE_ARROW} A snippet named `{name}` already exists. Use `-snippet edit {name} content`."
         )
 
     data[name] = content
@@ -553,7 +584,7 @@ async def edit_message(ctx, msg_id: int, *, content):
 
         await safe_delete(ctx.message)
 
-    except Exception as e:
+    except:
         await ctx.send(f"{RYR_BLUE_ARROW} Could not edit that message.")
 
 
@@ -569,21 +600,51 @@ async def delete_message(ctx, msg_id: int):
         await ctx.send(f"{RYR_BLUE_ARROW} Could not delete that message.")
 
 
+@bot.command(name="close")
+@is_support()
+async def close_ticket(ctx):
+    if not is_ticket_channel(ctx.channel):
+        return await ctx.send(
+            f"{RYR_BLUE_ARROW} This command can only be used inside a Ryan Air Concierge ticket channel."
+        )
+
+    target_user = await get_ticket_user(ctx.channel)
+
+    if target_user:
+        close_embed = discord.Embed(
+            title=f"{RYR_MAINTENANCE} Ticket Closed",
+            description=(
+                f"{RYR_BLUE_ARROW} Your Ryan Air Concierge ticket has now been closed.\n\n"
+                f"Thank you for contacting us."
+            ),
+            color=BRAND_COLOR
+        )
+
+        try:
+            await target_user.send(embed=close_embed)
+        except:
+            pass
+
+    await ctx.send(f"{RYR_MAINTENANCE} Closing this ticket...")
+    await ctx.channel.delete(reason=f"Ticket closed by {ctx.author}")
+
+
 @bot.command(name="help")
 @is_support()
 async def help_command(ctx):
     embed = discord.Embed(
         title=f"{RYR_LOGO} Ryan Air Concierge Commands",
         description=(
-            f"{RYR_YELLOW_ARROW} `-r message` — Reply normally\n"
-            f"{RYR_YELLOW_ARROW} `-ra message` — Anonymous reply\n"
-            f"{RYR_YELLOW_ARROW} `-snippets` — View snippets\n"
-            f"{RYR_YELLOW_ARROW} `-snippet add name content` — Add snippet\n"
-            f"{RYR_YELLOW_ARROW} `-snippet edit name content` — Edit snippet\n"
-            f"{RYR_YELLOW_ARROW} `-snippet delete name` — Delete snippet\n"
-            f"{RYR_YELLOW_ARROW} `-edit message_id content` — Edit bot message\n"
-            f"{RYR_YELLOW_ARROW} `-d message_id` — Delete message\n\n"
-            f"{RYR_FLAG} Typing `hi`, `hello`, or `hey` opens the ticket confirmation interface."
+            f"{RYR_YELLOW_ARROW} `-r message` — reply to the DM user\n"
+            f"{RYR_YELLOW_ARROW} `-ra message` — anonymous reply to the DM user\n"
+            f"{RYR_YELLOW_ARROW} `-snippets` — view snippets\n"
+            f"{RYR_YELLOW_ARROW} `-snippet add name content` — add snippet\n"
+            f"{RYR_YELLOW_ARROW} `-snippet edit name content` — edit snippet\n"
+            f"{RYR_YELLOW_ARROW} `-snippet delete name` — delete snippet\n"
+            f"{RYR_YELLOW_ARROW} `-edit message_id content` — edit bot message\n"
+            f"{RYR_YELLOW_ARROW} `-d message_id` — delete a channel message\n"
+            f"{RYR_YELLOW_ARROW} `-close` — close ticket\n\n"
+            f"{RYR_FLAG} Users create tickets by **DMing the bot**."
         ),
         color=BRAND_COLOR
     )
@@ -602,6 +663,7 @@ async def help_command(ctx):
 @snippet.error
 @edit_message.error
 @delete_message.error
+@close_ticket.error
 @help_command.error
 async def command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
@@ -611,7 +673,7 @@ async def command_error(ctx, error):
 
     if isinstance(error, commands.MissingRequiredArgument):
         return await ctx.send(
-            f"{RYR_BLUE_ARROW} Missing required information. Use `-help` for command formats."
+            f"{RYR_BLUE_ARROW} Missing information. Use `-help` for command formats."
         )
 
     await ctx.send(f"{RYR_BLUE_ARROW} Something went wrong while running this command.")
